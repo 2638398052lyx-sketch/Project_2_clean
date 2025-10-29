@@ -14,6 +14,3 @@
 .RData
 .DS_Store
 .quarto/
-.Rproj.user
-.httr-oauth
-.quarto
