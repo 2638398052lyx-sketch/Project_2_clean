@@ -1,0 +1,186 @@
+---
+title: "Project2"
+author: "Yixuan Liu"
+date: "2025-10-29"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+pkgs <- c("dplyr","readr","janitor","lubridate","ggplot2","magrittr","tidyr")
+to_install <- setdiff(pkgs, rownames(installed.packages()))
+if (length(to_install)) install.packages(to_install, quiet = TRUE)
+suppressPackageStartupMessages(invisible(lapply(pkgs, require, character.only = TRUE)))
+
+# 全局 chunk 选项（可按需）
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+Sys.setenv(BIOSTA721_DATA = "/Users/liuyixuan/Desktop/Biosta721/Project_2/data")
+`%>%` <- magrittr::`%>%`
+data_dir <- Sys.getenv("BIOSTA721_DATA", unset = "data")
+f2018 <- file.path(data_dir, "AQ_2018.csv")
+f2019 <- file.path(data_dir, "AQ_2019.csv")
+f2020 <- file.path(data_dir, "AQ_2020.csv")
+stopifnot(all(file.exists(c(f2018, f2019, f2020))))
+```
+
+## Function
+
+```{r function}
+pkgs <- c(
+  "dplyr",     
+  "readr",     
+  "janitor",   
+  "lubridate", 
+  "ggplot2",   
+  "magrittr"   
+)
+
+process_aq <- function(csv_path) {
+  stopifnot(file.exists(csv_path))
+  df0 <- readr::read_csv(csv_path, show_col_types = FALSE) |>
+    janitor::clean_names()
+  nm <- names(df0)
+  pick1 <- function(pattern) {
+    i <- grep(pattern, nm, ignore.case = TRUE)
+    if (length(i)) nm[i[1]] else NA_character_
+  }
+date_col <- pick1("^date(_.*)?$")
+  co_col   <- pick1("^(co.*conc|daily_max_8_hour_co_concentration|co)$")
+  pm_col   <- pick1("^(pm\\s*2\\.?5|pm2_?5|daily_mean_pm2_5_concentration)$")
+  o3_col   <- pick1("^(o3.*conc|daily_max_8_hour_ozone_concentration|o3|ozone)$")
+getcol <- function(colname, na = NA_character_) {
+    if (!is.na(colname) && colname %in% nm) df0[[colname]] else na
+} 
+df1 <- data.frame(
+    date     = getcol(date_col, na = NA_character_),
+    co_raw   = getcol(co_col,   na = NA_character_),
+    pm25_raw = getcol(pm_col,   na = NA_character_),
+    o3_raw   = getcol(o3_col,   na = NA_character_),
+    stringsAsFactors = FALSE
+  )
+as_num <- function(x) if (is.numeric(x)) x else readr::parse_number(as.character(x))
+
+  df1 |>
+    dplyr::mutate(
+      date = if (inherits(.data$date, "Date")) .data$date else lubridate::mdy(.data$date),
+      co   = as_num(.data$co_raw),
+      pm25 = as_num(.data$pm25_raw),
+      o3   = as_num(.data$o3_raw)
+    ) |>
+    dplyr::select(date, co, pm25, o3) |>
+    dplyr::distinct() |>
+    dplyr::group_by(date) |>
+    dplyr::summarise(
+      co   = mean(co,   na.rm = TRUE),
+      pm25 = mean(pm25, na.rm = TRUE),
+      o3   = mean(o3,   na.rm = TRUE),
+      .groups = "drop"
+    ) |>
+    dplyr::mutate(dplyr::across(c(co, pm25, o3), ~ ifelse(is.na(.x), NA_real_, pmax(.x, 0)))) |>
+    dplyr::arrange(date) |>
+    dplyr::mutate(
+      year      = lubridate::year(date),
+      month_num = lubridate::month(date)
+    )
+}
+
+f2018 <- file.path(data_dir, "AQ_2018.csv")
+f2019 <- file.path(data_dir, "AQ_2019.csv")
+f2020 <- file.path(data_dir, "AQ_2020.csv")
+
+stopifnot(file.exists(f2018), file.exists(f2019), file.exists(f2020))
+
+as_num_robust <- function(x) {
+  if (is.numeric(x)) x else readr::parse_number(as.character(x))
+}
+aq_2018 <- process_aq(f2018)
+aq_2019 <- process_aq(f2019)
+aq_2020 <- process_aq(f2020)
+
+aq_all <- dplyr::bind_rows(
+  aq_2018 |> dplyr::mutate(src_year = 2018L),
+  aq_2019 |> dplyr::mutate(src_year = 2019L),
+  aq_2020 |> dplyr::mutate(src_year = 2020L)
+) |> dplyr::arrange(date)
+
+dplyr::glimpse(aq_2018)
+dplyr::glimpse(aq_2019)
+dplyr::glimpse(aq_2020)
+dplyr::glimpse(aq_all)
+
+```
+
+## Plots
+
+```{r plots}
+# Q2-1: CO & O3 (avg across years) with 95% CIs
+# Step 1: Compute monthly means per (year, month) for CO and O3
+co_o3_by_ym <- aq_all |>
+  group_by(year, month_num) |>
+  summarise(
+    co_mean = mean(co, na.rm = TRUE),
+    o3_mean = mean(o3, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_longer(c(co_mean, o3_mean), names_to = "pollutant", values_to = "value") %>%
+  mutate(
+    pollutant = recode(pollutant, co_mean = "CO", o3_mean = "O3")
+  )
+
+# Step 2: Aggregate across available years for each (month, pollutant)
+# Use t-based 95% CIs; if only 1 year available, skip CI (NA)
+co_o3_across_years <- co_o3_by_ym |>
+  group_by(month_num, pollutant) |>
+  summarise(
+    n_years = sum(!is.na(value)),
+    mean_m  = mean(value, na.rm = TRUE),
+    sd_m    = sd(value, na.rm = TRUE),
+    se_m    = sd_m / sqrt(n_years),
+    tcrit   = qt(0.975, pmax(n_years - 1, 1)),
+    lwr     = ifelse(n_years > 1, mean_m - tcrit * se_m, NA_real_),
+    upr     = ifelse(n_years > 1, mean_m + tcrit * se_m, NA_real_),
+    .groups = "drop"
+  ) |>
+  mutate(month = factor(month.abb[month_num], levels = month.abb))
+
+# Step 3: Plot — points + lines + 95% CI error bars
+p1 <- ggplot(co_o3_across_years,
+             aes(x = month, y = mean_m, color = pollutant, group = pollutant)) +
+  geom_point(size = 2) +
+  geom_line(alpha = 0.8) +
+  geom_errorbar(aes(ymin = lwr, ymax = upr), width = 0.15, na.rm = TRUE, alpha = 0.7) +
+  labs(
+    title = "Monthly Averages of CO and O3 (Averaged Across Years)",
+    x = "Month", y = "Concentration (as in source data)",
+    color = "Pollutant"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+print(p1)
+
+# Q2-2: PM2.5 monthly means by year (color = year)
+# Step 1: Compute monthly means per (year, month) for PM2.5
+pm_by_ym <- aq_all |>
+  group_by(year, month_num) |>
+  summarise(pm25_mean = mean(pm25, na.rm = TRUE), .groups = "drop") |>
+  mutate(
+    month = factor(month.abb[month_num], levels = month.abb),
+    year  = factor(year)
+  )
+
+# Step 2: Plot — one line per year, points on each month
+p2 <- ggplot(pm_by_ym, aes(x = month, y = pm25_mean, group = year, color = year)) +
+  geom_line(linewidth = 0.8, alpha = 0.9) +
+  geom_point(size = 2) +
+  labs(
+    title = "Monthly PM2.5 by Year",
+    x = "Month", y = "PM2.5 (as in source data)",
+    color = "Year"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+print(p2)
+```
+
