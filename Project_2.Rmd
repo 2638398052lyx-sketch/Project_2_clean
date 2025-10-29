@@ -11,7 +11,6 @@ to_install <- setdiff(pkgs, rownames(installed.packages()))
 if (length(to_install)) install.packages(to_install, quiet = TRUE)
 suppressPackageStartupMessages(invisible(lapply(pkgs, require, character.only = TRUE)))
 
-# 全局 chunk 选项（可按需）
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 Sys.setenv(BIOSTA721_DATA = "/Users/liuyixuan/Desktop/Biosta721/Project_2/data")
