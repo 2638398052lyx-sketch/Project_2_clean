@@ -1,0 +1,187 @@
+---
+title: "Project2"
+author: "Yixuan Liu"
+date: "2025-11-13"
+output: word_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message= FALSE, warning=FALSE)
+Sys.setenv(BIOSTA721_DATA = "/Users/liuyixuan/Desktop/Biosta721/Project_2/data")
+
+data_dir <- Sys.getenv("BIOSTA721_DATA", unset = "data")
+f2018 <- file.path(data_dir, "AQ_2018.csv")
+f2019 <- file.path(data_dir, "AQ_2019.csv")
+f2020 <- file.path(data_dir, "AQ_2020.csv")
+stopifnot(all(file.exists(c(f2018, f2019, f2020))))
+```
+
+## Function
+
+```{r function}
+# Load packages for data import, manipulation, dates, and plotting
+library(readr)      # read_csv()
+library(dplyr)      # pipes (%>%), mutate(), select(), etc.
+library(lubridate)  # date parsing and extracting year/month
+library(tidyverse)  # collection of tidyverse packages (includes tidyr, ggplot2, etc.)
+
+# Function to read and preprocess one year of air quality data
+process_aq <- function(path) {
+  # Read the raw CSV file; suppress printing of column type messages
+  df_raw <- read_csv(path, show_col_types = FALSE)
+  
+  # Keep only the four variables we need and give them clean names
+  df2 <- df_raw %>% 
+    transmute(
+      # Convert "Date" string (e.g. "01/01/2018") to a Date object
+      date = mdy(Date), 
+      # Convert CO, PM2.5, and O3 columns to numeric
+      co   = as.numeric(`Daily Max 8-hour CO Concentration`),
+      pm25 = as.numeric(`Daily Mean PM2.5 Concentration`),
+      o3   = as.numeric(`Daily Max 8-hour Ozone Concentration`)
+    ) %>% 
+    distinct()         # Remove any exact duplicate rows (same date and pollutant values)
+  
+  # Sort by date and add year / month / month_num variables
+  df3 <- df2 %>% 
+    arrange(date) %>% 
+    mutate(
+      year      = year(date),                               # calendar year (e.g. 2018)
+      month     = month(date, label = TRUE, abbr = TRUE),   # ordered factor: Jan, Feb, ...
+      month_num = month(date)                              # numeric month: 1–12
+    )
+  
+  return(df3)  # Return the cleaned daily dataset for one year
+}
+
+# Directory where the CSV files are stored (relative to the Rmd/document)
+data_dir <- "data"
+
+# Build full file paths for each year’s CSV file
+f2018 <- file.path(data_dir, "AQ_2018.csv")
+f2019 <- file.path(data_dir, "AQ_2019.csv")
+f2020 <- file.path(data_dir, "AQ_2020.csv")
+
+# Sanity check: stop with an error if any of the files do not exist
+stopifnot(file.exists(f2018), file.exists(f2019), file.exists(f2020))
+
+# Process each year’s data and add a source-year indicator
+aq_2018 <- process_aq(f2018) %>%
+  dplyr::mutate(src_year = 2018)
+
+aq_2019 <- process_aq(f2019) %>%
+  dplyr::mutate(src_year = 2019)
+
+aq_2020 <- process_aq(f2020) %>%
+  dplyr::mutate(src_year = 2020)
+
+# Combine all three years into a single dataset and ensure src_year is integer
+aq_all <- dplyr::bind_rows(
+  aq_2018 %>% dplyr::mutate(src_year = 2018L),
+  aq_2019 %>% dplyr::mutate(src_year = 2019L),
+  aq_2020 %>% dplyr::mutate(src_year = 2020L)
+) %>% 
+  dplyr::arrange(date)   # Sort the combined data chronologically
+
+# Quick structural checks of each yearly dataset and the combined dataset
+dplyr::glimpse(aq_2018)
+dplyr::glimpse(aq_2019)
+dplyr::glimpse(aq_2020)
+dplyr::glimpse(aq_all)
+```
+
+## Plots
+
+```{r plots}
+# Q2-1: CO & O3 (avg across years) with 95% CIs
+# Step 1: Compute monthly means per (year, month) for CO and O3
+co_o3_by_ym <- aq_all %>%
+  group_by(year, month_num) %>%
+  summarise(
+    co_mean = mean(co, na.rm = TRUE),
+    o3_mean = mean(o3, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(c(co_mean, o3_mean), names_to = "pollutant", values_to = "value") %>%
+  mutate(
+    pollutant = recode(pollutant, co_mean = "CO", o3_mean = "O3")
+  )
+
+# Step 2: Aggregate across available years for each (month, pollutant)
+# Use t-based 95% CIs; if only 1 year available, skip CI (NA)
+co_o3_across_years <- co_o3_by_ym %>%
+  group_by(month_num, pollutant) %>%
+  summarise(
+    n_years = sum(!is.na(value)),
+    mean_m  = mean(value, na.rm = TRUE),
+    sd_m    = sd(value, na.rm = TRUE),
+    se_m    = sd_m / sqrt(n_years),
+    tcrit   = qt(0.975, pmax(n_years - 1, 1)),
+    lwr     = ifelse(n_years > 1, mean_m - tcrit * se_m, NA_real_),
+    upr     = ifelse(n_years > 1, mean_m + tcrit * se_m, NA_real_),
+    .groups = "drop"
+  ) %>%
+  mutate(month = factor(month.abb[month_num], levels = month.abb))
+
+# Step 3: Plot — points + lines + 95% CI error bars
+p1 <- ggplot(co_o3_across_years,
+             aes(x = month, y = mean_m, color = pollutant, group = pollutant)) +
+  geom_point(size = 2) +
+  geom_line(alpha = 0.8) +
+  geom_errorbar(aes(ymin = lwr, ymax = upr), width = 0.15, na.rm = TRUE, alpha = 0.7) +
+  labs(
+    title = "Monthly Averages of CO and O3 (Averaged Across Years)",
+    x = "Month", y = "Concentration (as in source data)",
+    color = "Pollutant"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+print(p1)
+
+# Q2-2: PM2.5 monthly means by year (color = year)
+# Step 1: Compute monthly means per (year, month) for PM2.5
+pm_by_ym <- aq_all %>%
+  group_by(year, month_num) %>%
+  summarise(pm25_mean = mean(pm25, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    month = factor(month.abb[month_num], levels = month.abb),
+    year  = factor(year)
+  )
+
+# Step 2: Plot — one line per year, points on each month
+p2 <- ggplot(pm_by_ym, aes(x = month, y = pm25_mean, group = year, color = year)) +
+  geom_line(linewidth = 0.8, alpha = 0.9) +
+  geom_point(size = 2) +
+  labs(
+    title = "Monthly PM2.5 by Year",
+    x = "Month", y = "PM2.5 (as in source data)",
+    color = "Year"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+print(p2)
+```
+Figure 1 displays the average monthly concentrations of CO and O3, after first computing daily averages for each monitor, then taking monthly means within each year, and finally averaging those monthly means across all available years. For each month and pollutant, I show a point for the mean, lines connecting the months, and t-based 95% confidence intervals across years. For months where fewer than three years of data are available (e.g., later months in 2020), the intervals are wider or absent, reflecting the smaller sample size.
+
+The seasonal pattern for CO is quite clear. CO levels are highest in late autumn and winter and lowest in summer. For example, the across-year monthly averages for CO are approximately 0.51 ppm in December and 0.47 ppm in November, whereas they are about 0.25–0.30 ppm in late spring and summer (for instance, around 0.25 ppm in July). This pattern is consistent with greater wintertime emissions (heating, more stagnant atmospheric conditions, and inversions) and more efficient dispersion and mixing during the warmer months.
+
+In contrast, O3 exhibits the opposite seasonal pattern. Ozone concentrations are lowest in winter and highest in late spring and early summer. The across-year monthly averages for O3 are roughly 0.03 ppm in December and January, rising to about 0.05 ppm in June before declining again in the fall. This is consistent with established photochemistry: ozone is formed through sunlight-driven reactions involving NOx and VOCs, so higher solar radiation and warmer temperatures in late spring and summer promote ozone formation.
+
+Comparing the two pollutants, CO and O3 are almost out of phase over the course of the year. CO peaks in the cold months when combustion emissions are high and the boundary layer is shallow, whereas O3 peaks in the warm months when photochemical production is strongest. The 95% confidence intervals are generally narrow in the first four months, where all three years contribute data, and become wider or missing in later months when only 2018 and 2019 are available. Overall, the plot highlights a strong and expected seasonal pattern for both pollutants, with CO being a winter-dominated pollutant and O3 a summer-dominated pollutant.
+
+Figure 2 compares monthly mean PM2.5 concentrations by year, with a separate line for each of 2018, 2019, and 2020 (for 2020, only January through April are available in the dataset). For each year, I first compute the daily average PM2.5 across monitors, then average those daily values within each calendar month. The plot then shows how these monthly means vary over the course of the year and how the patterns differ between years.
+
+Across all years, PM2.5 shows a clear seasonal pattern, with higher concentrations in the colder months and lower concentrations in late spring and early autumn. In 2018, the monthly means range from about 6.1 μg/m³ (September) to about 10.6 μg/m³ (December), with elevated levels in winter (December–January) and a modest increase again in mid-summer (July–August). In 2019, the pattern is similar but slightly shifted: the highest monthly mean occurs around February (about 10.3 μg/m³), and values are lower in early autumn (around 5.5 μg/m³ in October). These patterns are consistent with wintertime stagnation and inversions that trap particulate matter, as well as occasional summer episodes.
+
+The partial year of 2020 stands out when compared to the corresponding months in 2018 and 2019. For January, the mean PM2.5 is about 4.8 μg/m³ in 2020, versus roughly 9.2–9.3 μg/m³ in 2018 and 2019. February 2020 (around 6.2 μg/m³) is also lower than February 2019 (about 10.3 μg/m³) and slightly lower than February 2018 (about 7.4 μg/m³). By March and April, 2020 PM2.5 levels are closer to 2018 (for example, March 2020 is about 7.7 μg/m³, which is very similar to March 2018 but still lower than March 2019). Thus, for the months where 2020 data are available, PM2.5 tends to be noticeably lower—especially in January—than in the same months of the preceding two years.
+
+It is important to note that we have only four months of data for 2020, so we cannot make a full year-to-year comparison over all seasons. However, the available evidence suggests that the early-2020 PM2.5 burden was reduced relative to 2018 and 2019, particularly in mid-winter. This could reflect a combination of changes in emissions (for example, behavioral or activity changes in early 2020) and meteorological differences. Overall, the figure reinforces the idea that PM2.5 is seasonally higher during winter, while also highlighting meaningful inter-annual variability in both magnitude and timing of peaks.
+
+
+
+
+
+
